@@ -10,3 +10,6 @@ Available templates:
 
 - `chess_engine/` - a tiny Python chess engine example that benchmarks the
   current working tree against the previous committed engine in self-play.
+- `maze_solver/` - a weighted-grid pathfinding example where the solver is
+  scored on solved count, path quality, and search efficiency under a tight
+  expansion budget.

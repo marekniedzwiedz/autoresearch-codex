@@ -1,0 +1,33 @@
+# Codex execution settings.
+[codex]
+# Path to the Codex CLI binary.
+binary = "codex"
+# Optional model override. Leave empty to use the CLI default.
+model = ""
+# Extra CLI args passed through to `codex exec`.
+extra_args = []
+
+# Loop stopping conditions.
+[search]
+# Maximum number of candidate rounds to try.
+max_rounds = 5
+# Maximum wall clock time for a run, in minutes.
+max_wall_time_minutes = 20
+# Stop after this many non-improving rounds in a row.
+max_stagnation_rounds = 3
+
+# How the harness evaluates a candidate branch.
+[evaluator]
+# Commands run after each Codex attempt. All must exit with code 0.
+commands = ["python3 -m unittest -q", "python3 benchmark.py"]
+# Regex used to extract the numeric score from evaluator output.
+score_regex = "AUTORESEARCH_SCORE=(?P<score>-?[0-9]+(?:\\.[0-9]+)?)"
+# Higher is better because the benchmark uses an absolute score.
+direction = "maximize"
+
+# Git and artifact layout.
+[git]
+# Optional base branch override. Leave empty to auto-detect.
+base_branch = ""
+# Directory inside the target repo where logs, state, and worktrees are stored.
+artifacts_dir = ".autoresearch"
