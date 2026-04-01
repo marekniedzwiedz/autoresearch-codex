@@ -12,7 +12,6 @@ CASE_BUDGET = 220
 SOLVE_BONUS = 10_000
 QUALITY_BONUS = 2_000
 QUALITY_PENALTY = 35
-EFFICIENCY_BONUS = 600
 CASE_SEEDS = (7, 11, 19, 23, 31, 43, 59, 71, 83, 97)
 ORTHOGONAL_STEPS = ((1, 0), (-1, 0), (0, 1), (0, -1))
 
@@ -148,14 +147,29 @@ def validate_result(grid: tuple[str, ...], result: SearchResult) -> tuple[bool, 
     return True, total_cost
 
 
+def require_plain_int(name: str, value: object) -> int:
+    if type(value) is not int:
+        raise TypeError("SearchResult.{0} must be a plain int".format(name))
+    return value
+
+
+def normalize_result(result: SearchResult) -> SearchResult:
+    return SearchResult(
+        solved=bool(result.solved),
+        path=tuple(result.path),
+        cost=require_plain_int("cost", result.cost),
+        expanded=require_plain_int("expanded", result.expanded),
+        status=str(result.status),
+    )
+
+
 def case_score(optimal_cost: int, result: SearchResult) -> tuple[int, str]:
     if not result.solved:
         return 0, result.status
 
     gap = max(0, result.cost - optimal_cost)
     quality_score = max(0, QUALITY_BONUS - gap * QUALITY_PENALTY)
-    efficiency_score = max(0, EFFICIENCY_BONUS - result.expanded)
-    total = SOLVE_BONUS + quality_score + efficiency_score
+    total = SOLVE_BONUS + quality_score
     label = "solved gap={0} expanded={1}".format(gap, result.expanded)
     return total, label
 
@@ -166,7 +180,10 @@ def main() -> int:
     for seed in CASE_SEEDS:
         grid = build_case(seed)
         optimal_cost = dijkstra_cost(grid)
-        result = solve(grid, budget=CASE_BUDGET)
+        try:
+            result = normalize_result(solve(grid, budget=CASE_BUDGET))
+        except TypeError:
+            result = SearchResult(False, tuple(), -1, CASE_BUDGET, "invalid_result")
         valid, _ = validate_result(grid, result)
         if result.solved and not valid:
             result = SearchResult(False, tuple(), -1, result.expanded, "invalid_path")

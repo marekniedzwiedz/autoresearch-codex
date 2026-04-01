@@ -18,7 +18,7 @@ and gets closer to the exact optimal path cost.
 - Favor heuristics and data structures that help under a tight expansion budget.
 - Solve rate matters more than perfect path quality.
 - After solve rate, focus on reducing cost gap to the exact optimum.
-- Use node expansions carefully; the benchmark rewards efficiency.
+- Use node expansions carefully; the tight budget still affects solve rate even though the benchmark score only trusts independently verified outcomes.
 - Run `python3 -m unittest -q` freely while iterating.
 - Run `python3 benchmark.py` only after a meaningful solver change that is ready for evaluation.
 - Avoid rerunning the full benchmark repeatedly for tiny tweaks inside one round.

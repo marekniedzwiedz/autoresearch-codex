@@ -22,7 +22,7 @@ max_stagnation_rounds = 3
 commands = ["python3 -m unittest -q", "python3 benchmark.py"]
 # Regex used to extract the numeric score from evaluator output.
 score_regex = "AUTORESEARCH_SCORE=(?P<score>-?[0-9]+(?:\\.[0-9]+)?)"
-# Higher is better because the benchmark adds match margin to the champion score.
+# Higher is better because promoted champions receive a higher Elo-like rating.
 direction = "maximize"
 
 # Git and artifact layout.

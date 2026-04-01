@@ -24,11 +24,11 @@ python3 /path/to/run.py run --repo /tmp/maze-solver-demo
 - `benchmark.py` generates a fixed set of weighted grid mazes from deterministic seeds.
 - Each maze has an exact reference cost computed by an unrestricted Dijkstra search inside the benchmark.
 - The candidate solver only gets a tight node-expansion budget for each maze.
-- The score rewards three things, in this order:
+- The score rewards two things, in this order:
   - solving more mazes
   - getting path cost closer to the exact optimum
-  - using fewer node expansions
 - This makes it an optimization problem rather than a one-shot perfect shortest-path exercise.
+- The benchmark still prints the solver's reported `expanded` count for debugging, but it does not score it because that number comes from candidate code and is not independently verifiable.
 
 The score is absolute:
 

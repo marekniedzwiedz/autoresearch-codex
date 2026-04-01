@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import math
 import os
 import subprocess
 import sys
@@ -17,6 +18,7 @@ ENGINE_PATH = ROOT / "engine.py"
 ALLOWED_CHANGED_FILES = {"engine.py"}
 MAX_PLIES = 400
 DEFAULT_MOVETIME_MS = int(os.environ.get("UCI_MOVETIME_MS", "100"))
+ELO_PRIOR_POINTS = 0.5
 
 STARTING_POSITIONS = [
     ("giuoco_piano", "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4"),
@@ -34,7 +36,8 @@ def main() -> int:
         candidate_points, games = play_match(previous_path)
 
     previous_points = len(games) - candidate_points
-    score_delta = candidate_points - half_match_points(len(games))
+    promotion = promotion_earned(candidate_points, len(games))
+    match_elo_delta = estimate_match_elo_delta(candidate_points, len(games))
     score = score_from_match(previous_score, candidate_points, len(games))
 
     print("previous_score={0:.1f}".format(previous_score))
@@ -45,7 +48,9 @@ def main() -> int:
     print("candidate_points={0:.1f}".format(candidate_points))
     print("previous_points={0:.1f}".format(previous_points))
     print("match_target={0:.1f}".format(half_match_points(len(games))))
-    print("score_delta={0:.1f}".format(score_delta))
+    print("promotion_earned={0}".format("yes" if promotion else "no"))
+    print("estimated_match_elo_delta={0:+.1f}".format(match_elo_delta))
+    print("estimated_champion_elo={0:.1f}".format(score))
     print("AUTORESEARCH_SCORE={0:.1f}".format(score))
     return 0
 
@@ -130,8 +135,20 @@ def half_match_points(total_games: int) -> float:
     return total_games / 2.0
 
 
+def promotion_earned(candidate_points: float, total_games: int) -> bool:
+    return candidate_points > half_match_points(total_games)
+
+
 def score_from_match(previous_score: float, candidate_points: float, total_games: int) -> float:
-    return previous_score + (candidate_points - half_match_points(total_games))
+    if not promotion_earned(candidate_points, total_games):
+        return previous_score
+    return previous_score + estimate_match_elo_delta(candidate_points, total_games)
+
+
+def estimate_match_elo_delta(candidate_points: float, total_games: int) -> float:
+    # Apply a tiny prior so 10/10 or 0/10 do not imply infinite Elo.
+    score_share = (candidate_points + ELO_PRIOR_POINTS) / (total_games + (2.0 * ELO_PRIOR_POINTS))
+    return 400.0 * math.log10(score_share / (1.0 - score_share))
 
 
 def write_previous_engine(tmpdir: Path) -> Path:

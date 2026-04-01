@@ -33,18 +33,21 @@ python3 /path/to/run.py run --repo /tmp/chess-engine-demo
 - If a game reaches the benchmark cap of 200 full moves, it is treated as a
   draw so the loop stays bounded without inventing a winner from material.
 - If the current engine scores more than 50% of the match points against the
-  previous committed engine, `benchmark.py` increases `AUTORESEARCH_SCORE`
-  above the champion score.
-- If it scores 50% or less, the score stays flat or drops, so the harness
-  rejects it.
+  previous committed engine, it earns promotion.
+- If it scores 50% or less, promotion is not earned and the harness rejects
+  it.
 
-The score is intentionally monotonic:
+The benchmark still emits a numeric `AUTORESEARCH_SCORE` for the harness, but
+that number is now just an Elo-like champion rating anchored at `0.0` for the
+initial engine:
 
 - baseline starts at `0.0`
-- each successful round adds only the points the candidate finished above an
-  exactly tied match against the current champion
-- this means any strict match win is enough to advance, regardless of how
-  strongly earlier versions won
+- ties and losses leave the rating unchanged
+- a promoted candidate adds a smoothed Elo-style delta inferred from that
+  match result against the current champion
+
+In other words, promotion is binary, while the stored score is only a rough
+strength estimate for champions that did earn promotion.
 
 ## Quick checks
 
