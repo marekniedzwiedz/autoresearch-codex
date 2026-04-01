@@ -10,9 +10,9 @@ extra_args = []
 # Loop stopping conditions.
 [search]
 # Maximum number of candidate rounds to try.
-max_rounds = 5
+max_rounds = 10
 # Maximum wall clock time for a run, in minutes.
-max_wall_time_minutes = 30
+max_wall_time_minutes = 60
 # Stop after this many non-improving rounds in a row.
 max_stagnation_rounds = 3
 

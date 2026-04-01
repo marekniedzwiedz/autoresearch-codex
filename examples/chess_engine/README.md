@@ -32,15 +32,19 @@ python3 /path/to/run.py run --repo /tmp/chess-engine-demo
 - Finished games are scored only by normal chess outcomes: win, loss, or draw.
 - If a game reaches the benchmark cap of 200 full moves, it is treated as a
   draw so the loop stays bounded without inventing a winner from material.
-- If the current engine scores better than the previous committed engine,
-  `benchmark.py` increases `AUTORESEARCH_SCORE`.
-- If it draws or loses, the score stays flat or drops, so the harness rejects it.
+- If the current engine scores more than 50% of the match points against the
+  previous committed engine, `benchmark.py` increases `AUTORESEARCH_SCORE`
+  above the champion score.
+- If it scores 50% or less, the score stays flat or drops, so the harness
+  rejects it.
 
 The score is intentionally monotonic:
 
 - baseline starts at `0.0`
-- each successful round adds the match margin against the current champion
-- this means "won the match vs previous version" is enough to advance
+- each successful round adds only the points the candidate finished above an
+  exactly tied match against the current champion
+- this means any strict match win is enough to advance, regardless of how
+  strongly earlier versions won
 
 ## Quick checks
 

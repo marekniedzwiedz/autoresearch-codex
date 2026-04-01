@@ -14,7 +14,6 @@ import chess.engine
 
 ROOT = Path(__file__).resolve().parent
 ENGINE_PATH = ROOT / "engine.py"
-RESULTS_PATH = ROOT / ".autoresearch" / "results.tsv"
 ALLOWED_CHANGED_FILES = {"engine.py"}
 MAX_PLIES = 400
 DEFAULT_MOVETIME_MS = int(os.environ.get("UCI_MOVETIME_MS", "100"))
@@ -35,8 +34,8 @@ def main() -> int:
         candidate_points, games = play_match(previous_path)
 
     previous_points = len(games) - candidate_points
-    margin = candidate_points - previous_points
-    score = previous_score + margin
+    score_delta = candidate_points - half_match_points(len(games))
+    score = score_from_match(previous_score, candidate_points, len(games))
 
     print("previous_score={0:.1f}".format(previous_score))
     print("movetime_ms={0}".format(DEFAULT_MOVETIME_MS))
@@ -45,7 +44,8 @@ def main() -> int:
         print("game {0} candidate_as_{1}: {2} ({3})".format(label, color, format_points(points), detail))
     print("candidate_points={0:.1f}".format(candidate_points))
     print("previous_points={0:.1f}".format(previous_points))
-    print("match_margin={0:.1f}".format(margin))
+    print("match_target={0:.1f}".format(half_match_points(len(games))))
+    print("score_delta={0:.1f}".format(score_delta))
     print("AUTORESEARCH_SCORE={0:.1f}".format(score))
     return 0
 
@@ -87,10 +87,11 @@ def assert_allowed_changes() -> None:
         raise SystemExit("Only engine.py may change in this example; found: {0}".format(", ".join(unexpected)))
 
 
-def read_previous_champion_score() -> float:
-    if not RESULTS_PATH.exists():
+def read_previous_champion_score(results_path: Path | None = None) -> float:
+    path = results_path or shared_results_path()
+    if not path.exists():
         return 0.0
-    with RESULTS_PATH.open("r", encoding="utf-8", newline="") as handle:
+    with path.open("r", encoding="utf-8", newline="") as handle:
         rows = list(csv.DictReader(handle, delimiter="\t"))
     for row in reversed(rows):
         if row.get("status") not in {"baseline", "accepted"}:
@@ -100,6 +101,37 @@ def read_previous_champion_score() -> float:
         except (KeyError, TypeError, ValueError):
             return 0.0
     return 0.0
+
+
+def shared_results_path(root: Path = ROOT) -> Path:
+    return shared_repo_root(root) / ".autoresearch" / "results.tsv"
+
+
+def shared_repo_root(root: Path = ROOT) -> Path:
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return root
+    common_dir_text = result.stdout.strip()
+    if not common_dir_text:
+        return root
+    common_dir = Path(common_dir_text)
+    if not common_dir.is_absolute():
+        common_dir = (root / common_dir).resolve()
+    return common_dir.parent
+
+
+def half_match_points(total_games: int) -> float:
+    return total_games / 2.0
+
+
+def score_from_match(previous_score: float, candidate_points: float, total_games: int) -> float:
+    return previous_score + (candidate_points - half_match_points(total_games))
 
 
 def write_previous_engine(tmpdir: Path) -> Path:
