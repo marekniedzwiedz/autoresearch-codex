@@ -1,6 +1,6 @@
 # Chess Engine Example
 
-This is a template target repo for Codex-AutoResearch.
+This is a template target repo for Evoloza.
 
 Copy it to a separate directory first, then initialize it as its own git repo:
 
@@ -16,7 +16,7 @@ git commit -m "Initialize chess engine example"
 Then run the harness against the copied repo:
 
 ```bash
-python3 /path/to/run.py run --repo /tmp/chess-engine-demo
+evoloza run --repo /tmp/chess-engine-demo
 ```
 
 ## How the benchmark works

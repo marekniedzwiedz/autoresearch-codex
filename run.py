@@ -28,6 +28,11 @@ except ModuleNotFoundError:
 PROGRAM_FILENAME = "program.md"
 CONFIG_FILENAME = "config.toml"
 LEGACY_CONFIG_FILENAME = "autoresearch.toml"
+APP_NAME = "Evoloza"
+CLI_NAME = "evoloza"
+DEFAULT_ARTIFACTS_DIR = ".evoloza"
+LEGACY_ARTIFACTS_DIR = ".autoresearch"
+BRANCH_PREFIX = "evoloza"
 RESULT_COLUMNS = [
     "run_id",
     "round",
@@ -98,7 +103,7 @@ direction = "maximize"
 # Optional base branch override. Leave empty to auto-detect.
 base_branch = ""
 # Directory inside the target repo where logs, state, and worktrees are stored.
-artifacts_dir = ".autoresearch"
+artifacts_dir = ".evoloza"
 """
 
 class TomlDecodeError(ValueError):
@@ -133,7 +138,7 @@ class SearchSettings:
 @dataclass
 class GitSettings:
     base_branch: Optional[str] = None
-    artifacts_dir: str = ".autoresearch"
+    artifacts_dir: str = DEFAULT_ARTIFACTS_DIR
 
 
 @dataclass
@@ -613,9 +618,20 @@ def load_project_config(repo: Path) -> ProjectConfig:
         ),
         git=GitSettings(
             base_branch=_empty_to_none(git_section.get("base_branch")),
-            artifacts_dir=str(git_section.get("artifacts_dir", ".autoresearch")),
+            artifacts_dir=resolve_artifacts_dir(repo, git_section),
         ),
     )
+
+
+def resolve_artifacts_dir(repo: Path, git_section: Dict[str, Any]) -> str:
+    configured = _empty_to_none(git_section.get("artifacts_dir"))
+    if configured is not None:
+        return str(configured)
+    if (repo / DEFAULT_ARTIFACTS_DIR).exists():
+        return DEFAULT_ARTIFACTS_DIR
+    if (repo / LEGACY_ARTIFACTS_DIR).exists():
+        return LEGACY_ARTIFACTS_DIR
+    return DEFAULT_ARTIFACTS_DIR
 
 
 def program_text(repo: Path) -> str:
@@ -666,7 +682,7 @@ def ensure_git_repo(repo: Path) -> None:
             "commit",
             "--allow-empty",
             "-m",
-            "Initialize repository for Codex-AutoResearch",
+            "Initialize repository for {0}".format(APP_NAME),
             env=git_commit_env(),
         )
 
@@ -684,7 +700,7 @@ def has_commits(repo: Path) -> bool:
 
 def ensure_clean_worktree(repo: Path) -> None:
     if run_git(repo, "status", "--porcelain").strip():
-        raise GitError("Target repo must be clean before running Codex-AutoResearch")
+        raise GitError("Target repo must be clean before running {0}".format(APP_NAME))
 
 
 def determine_base_branch(repo: Path, configured: Optional[str]) -> str:
@@ -871,7 +887,7 @@ def build_worker_prompt(
 ) -> str:
     history_block = render_history_for_prompt(history_rows)
     prompt = """
-    You are running one Codex-AutoResearch experiment.
+    You are running one {app_name} experiment.
 
     Run id: {run_id}
     Round: {round_index}
@@ -902,6 +918,7 @@ def build_worker_prompt(
     """
     return textwrap.dedent(
         prompt.format(
+            app_name=APP_NAME,
             run_id=run_id,
             round_index=round_index,
             champion_branch=champion.branch,
@@ -1037,7 +1054,7 @@ def render_status(state: RunState) -> str:
 
 def render_report(state: RunState, results: List[Dict[str, str]]) -> str:
     lines = [
-        "# Codex-AutoResearch Report",
+        "# {0} Report".format(APP_NAME),
         "",
         "- Run id: `{0}`".format(state.run_id),
         "- Status: `{0}`".format(state.status),
@@ -1267,7 +1284,11 @@ class Orchestrator:
     def _plan_round(self, config: ProjectConfig, state: RunState) -> Dict[str, str]:
         round_index = state.current_round
         return {
-            "branch": "autoresearch/{run}/r{round:03d}".format(run=state.run_id, round=round_index),
+            "branch": "{prefix}/{run}/r{round:03d}".format(
+                prefix=BRANCH_PREFIX,
+                run=state.run_id,
+                round=round_index,
+            ),
             "worktree": str(self._worktree_path(config, state.run_id, round_index)),
             "artifact_dir": str(self._worker_dir(config, state.run_id, round_index)),
         }
@@ -1345,7 +1366,7 @@ class Orchestrator:
                     score = evaluation.score
                     if is_better(score, champion.score, config):
                         stage_paths(worktree_path, changed_paths)
-                        commit = commit_paths(worktree_path, "Codex-AutoResearch round {0}".format(round_index))
+                        commit = commit_paths(worktree_path, "{0} round {1}".format(APP_NAME, round_index))
                         status = "accepted"
                     else:
                         status = "rejected"
@@ -1472,10 +1493,10 @@ class Orchestrator:
         branch = source.branch
         if branch_exists(self.repo, branch):
             if head_commit(self.repo, branch) != source.commit:
-                branch = "autoresearch/{0}/seed".format(run_id)
+                branch = "{0}/{1}/seed".format(BRANCH_PREFIX, run_id)
                 self._ensure_branch_points_to_commit(branch, source.commit)
         else:
-            branch = "autoresearch/{0}/seed".format(run_id)
+            branch = "{0}/{1}/seed".format(BRANCH_PREFIX, run_id)
             self._ensure_branch_points_to_commit(branch, source.commit)
         return ChampionState(
             branch=branch,
@@ -1575,14 +1596,14 @@ class Orchestrator:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="codex-autoresearch")
+    parser = argparse.ArgumentParser(prog=CLI_NAME)
     subparsers = parser.add_subparsers(dest="command")
 
     init_parser = subparsers.add_parser("init", help="Scaffold target repo files")
     init_parser.add_argument("--repo", required=True, help="Path to the target repository")
     init_parser.add_argument("--force", action="store_true", help="Overwrite scaffold files")
 
-    run_parser = subparsers.add_parser("run", help="Run or resume autoresearch")
+    run_parser = subparsers.add_parser("run", help="Run or resume the improvement loop")
     run_parser.add_argument("--repo", required=True, help="Path to the target repository")
     run_parser.add_argument("--run-id", help="Resume a specific run id")
 
@@ -1611,7 +1632,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print("Scaffolded missing project files:", file=sys.stderr)
                 for path in created:
                     print("- {0}".format(path), file=sys.stderr)
-                print("Edit them and rerun `python3 run.py run --repo {0}`.".format(repo), file=sys.stderr)
+                print(
+                    "Edit them and rerun `{0} run --repo {1}` (or `python3 run.py run --repo {1}` for local development).".format(
+                        CLI_NAME,
+                        repo,
+                    ),
+                    file=sys.stderr,
+                )
                 return 1
             load_project_config(repo)
             progress = ProgressReporter()
@@ -1647,8 +1674,8 @@ def _empty_to_none(value):
 
 def git_commit_env() -> Dict[str, str]:
     env = os.environ.copy()
-    env.setdefault("GIT_AUTHOR_NAME", "Codex AutoResearch")
-    env.setdefault("GIT_AUTHOR_EMAIL", "codex-autoresearch@example.com")
+    env.setdefault("GIT_AUTHOR_NAME", APP_NAME)
+    env.setdefault("GIT_AUTHOR_EMAIL", "evoloza@example.com")
     env.setdefault("GIT_COMMITTER_NAME", env["GIT_AUTHOR_NAME"])
     env.setdefault("GIT_COMMITTER_EMAIL", env["GIT_AUTHOR_EMAIL"])
     return env

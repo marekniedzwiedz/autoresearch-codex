@@ -7,14 +7,14 @@ README = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
 
 
 setup(
-    name="codex-autoresearch",
+    name="evoloza",
     version="0.1.0",
-    description="A Codex-native autoresearch harness for git repositories.",
+    description="A Codex-native improvement-loop harness for git repositories.",
     long_description=README,
     long_description_content_type="text/markdown",
-    author="Codex AutoResearch",
+    author="Evoloza",
     python_requires=">=3.9",
     install_requires=["tomli>=2.0.1; python_version < '3.11'"],
     py_modules=["run"],
-    entry_points={"console_scripts": ["codex-autoresearch=run:main"]},
+    entry_points={"console_scripts": ["evoloza=run:main"]},
 )

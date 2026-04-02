@@ -1,6 +1,6 @@
 # Examples
 
-These are template target repos for Codex-AutoResearch.
+These are template target repos for Evoloza.
 
 Copy an example to its own directory before running the harness against it.
 Do not point the harness at `examples/...` in-place, because this directory

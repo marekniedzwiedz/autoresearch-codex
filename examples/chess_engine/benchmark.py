@@ -108,7 +108,12 @@ def read_previous_champion_score(results_path: Path | None = None) -> float:
 
 
 def shared_results_path(root: Path = ROOT) -> Path:
-    return shared_repo_root(root) / ".autoresearch" / "results.tsv"
+    repo_root = shared_repo_root(root)
+    evoloza_results = repo_root / ".evoloza" / "results.tsv"
+    legacy_results = repo_root / ".autoresearch" / "results.tsv"
+    if evoloza_results.exists() or not legacy_results.exists():
+        return evoloza_results
+    return legacy_results
 
 
 def shared_repo_root(root: Path = ROOT) -> Path:

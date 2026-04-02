@@ -1,6 +1,6 @@
 # Maze Solver Example
 
-This is a template target repo for Codex-AutoResearch.
+This is a template target repo for Evoloza.
 
 Copy it to a separate directory first, then initialize it as its own git repo:
 
@@ -15,7 +15,7 @@ git commit -m "Initialize maze solver example"
 Then run the harness against the copied repo:
 
 ```bash
-python3 /path/to/run.py run --repo /tmp/maze-solver-demo
+evoloza run --repo /tmp/maze-solver-demo
 ```
 
 ## How the benchmark works

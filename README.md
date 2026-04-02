@@ -1,7 +1,7 @@
-# Codex-AutoResearch
+# Evoloza
 
-Codex-AutoResearch is a reusable harness for running agent-driven improvement
-loops against arbitrary git repositories.
+Evoloza is a reusable harness for running agent-driven improvement loops
+against arbitrary git repositories.
 
 You point it at a target repo, give it instructions in `program.md`, and define
 an evaluator command that emits a numeric score. The harness then creates
@@ -23,7 +23,7 @@ Here is a real run on the hardened maze benchmark from `examples/maze_solver`.
 The first few rounds found the major algorithmic improvement; the later rounds
 mostly shaved latency while preserving exact benchmark quality.
 
-![Maze solver example progress](assets/maze-example-progress.svg)
+![Evoloza maze solver example progress](assets/evoloza-maze-example-progress.svg)
 
 ## What The Harness Manages
 
@@ -32,7 +32,7 @@ mostly shaved latency while preserving exact benchmark quality.
 - Codex invocation and structured experiment summaries
 - Evaluator execution and score extraction
 - Champion promotion when a candidate improves the score
-- Append-only experiment history in `.autoresearch/results.tsv`
+- Append-only experiment history in `.evoloza/results.tsv`
 - Per-run state and artifacts so runs can be resumed or inspected later
 
 ## Core Loop
@@ -51,24 +51,26 @@ mostly shaved latency while preserving exact benchmark quality.
 in `program.md`, the editable surface is intentionally tiny, and the repo is
 optimized for legibility.
 
-Codex-AutoResearch takes the same basic hill-climbing pattern but packages it
-as a reusable harness:
+Evoloza takes the same basic hill-climbing pattern but packages it as a
+reusable harness:
 
 - It works on arbitrary git repos, not one training script.
 - It supports arbitrary evaluator commands, not one fixed benchmark.
 - It tracks explicit run state, candidate state, and champion state.
 - It uses git worktrees and candidate branches for isolation.
-- It preserves per-round artifacts and cross-run history under `.autoresearch/`.
+- It preserves per-round artifacts and cross-run history under `.evoloza/`.
 
 The extra code is there to make the loop repeatable across different target
 repositories, not because the underlying search idea is more complicated.
 
 ## Commands
 
-- `codex-autoresearch init --repo /path/to/repo`
-- `codex-autoresearch run --repo /path/to/repo`
-- `codex-autoresearch status --repo /path/to/repo`
-- `codex-autoresearch report --repo /path/to/repo`
+- `evoloza init --repo /path/to/repo`
+- `evoloza run --repo /path/to/repo`
+- `evoloza status --repo /path/to/repo`
+- `evoloza report --repo /path/to/repo`
+
+The installed CLI is `evoloza`.
 
 For local development in this repository, you can also run:
 
@@ -85,12 +87,12 @@ Each target repo supplies:
 - `config.toml` with loop and evaluator settings
 - At least one evaluator command that exits successfully and prints a parseable score
 
-The harness writes its own state under `.autoresearch/`, including:
+The harness writes its own state under `.evoloza/`, including:
 
-- `.autoresearch/results.tsv` for cross-run experiment history
-- `.autoresearch/runs/<run_id>/state.json` for the latest run state
-- `.autoresearch/runs/<run_id>/rounds/...` for per-round prompts, logs, and results
-- `.autoresearch/worktrees/...` for temporary candidate worktrees
+- `.evoloza/results.tsv` for cross-run experiment history
+- `.evoloza/runs/<run_id>/state.json` for the latest run state
+- `.evoloza/runs/<run_id>/rounds/...` for per-round prompts, logs, and results
+- `.evoloza/worktrees/...` for temporary candidate worktrees
 
 ## Quick Start
 
@@ -100,7 +102,7 @@ command that prints a score like `AUTORESEARCH_SCORE=123`.
 Initialize the repo:
 
 ```bash
-python3 run.py init --repo /tmp/demo-repo
+evoloza init --repo /tmp/demo-repo
 ```
 
 If you skip `init` and call `run` first, the tool will scaffold missing
@@ -147,15 +149,15 @@ direction = "maximize"
 # Git and artifact layout.
 [git]
 base_branch = ""
-artifacts_dir = ".autoresearch"
+artifacts_dir = ".evoloza"
 ```
 
 Run the loop:
 
 ```bash
-python3 run.py run --repo /tmp/demo-repo
-python3 run.py status --repo /tmp/demo-repo
-python3 run.py report --repo /tmp/demo-repo
+evoloza run --repo /tmp/demo-repo
+evoloza status --repo /tmp/demo-repo
+evoloza report --repo /tmp/demo-repo
 ```
 
 ## What Happens During `run`
@@ -172,7 +174,7 @@ python3 run.py report --repo /tmp/demo-repo
   usage when Codex session files are available.
 - If the latest run already completed or stopped, `run` starts a fresh run from
   the last committed champion and continues using the full experiment history in
-  `.autoresearch/results.tsv`.
+  `.evoloza/results.tsv`.
 
 ## Why The Repo Is Larger Than A Demo
 

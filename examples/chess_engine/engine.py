@@ -5,7 +5,7 @@ import sys
 import chess
 
 
-ENGINE_NAME = "CodexAutoResearchExample"
+ENGINE_NAME = "EvolozaExample"
 ENGINE_AUTHOR = "OpenAI"
 DEFAULT_DEPTH = 2
 DEFAULT_MOVETIME_MS = 100

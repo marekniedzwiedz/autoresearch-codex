@@ -30,4 +30,4 @@ direction = "maximize"
 # Optional base branch override. Leave empty to auto-detect.
 base_branch = ""
 # Directory inside the target repo where logs, state, and worktrees are stored.
-artifacts_dir = ".autoresearch"
+artifacts_dir = ".evoloza"
