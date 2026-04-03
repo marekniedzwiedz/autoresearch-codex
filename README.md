@@ -94,6 +94,16 @@ The harness writes its own state under `.evoloza/`, including:
 - `.evoloza/runs/<run_id>/rounds/...` for per-round prompts, logs, and results
 - `.evoloza/worktrees/...` for temporary candidate worktrees
 
+Evaluator commands also receive run-local context through environment variables:
+
+- `EVOLOZA_RUN_ID`
+- `EVOLOZA_ROUND`
+- `EVOLOZA_ARTIFACT_DIR`
+- `EVOLOZA_WORKTREE`
+- `EVOLOZA_BASE_BRANCH`
+- `EVOLOZA_CHAMPION_BRANCH` when a champion already exists
+- `EVOLOZA_CHAMPION_SCORE` when a champion score already exists
+
 ## Quick Start
 
 Assume you have a repo at `/tmp/demo-repo` with some code and a benchmark

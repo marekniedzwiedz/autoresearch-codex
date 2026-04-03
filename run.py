@@ -810,9 +810,13 @@ def run_evaluator(
     artifact_dir: Path,
     progress: Optional[ProgressReporter] = None,
     stage_prefix: str = "Evaluator",
+    context_env: Optional[Dict[str, str]] = None,
 ) -> EvaluationResult:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     logs = []
+    command_env = os.environ.copy()
+    if context_env:
+        command_env.update(context_env)
     try:
         for index, command in enumerate(settings.commands, start=1):
             stage_message = "{prefix} {index}/{total}: {command}".format(
@@ -837,6 +841,7 @@ def run_evaluator(
                     executable="/bin/zsh",
                     capture_output=True,
                     text=True,
+                    env=command_env,
                     check=False,
                 )
             logs.append(
@@ -844,6 +849,7 @@ def run_evaluator(
                     "index": index,
                     "command": command,
                     "returncode": result.returncode,
+                    "context_env": context_env or {},
                     "stdout": result.stdout,
                     "stderr": result.stderr,
                 }
@@ -874,6 +880,30 @@ def run_evaluator(
     finally:
         if progress is not None:
             progress.end_phase()
+
+
+def build_evaluator_context_env(
+    *,
+    run_id: str,
+    round_index: int,
+    artifact_dir: Path,
+    worktree: Path,
+    base_branch: str,
+    champion_branch: Optional[str] = None,
+    champion_score: Optional[float] = None,
+) -> Dict[str, str]:
+    env = {
+        "EVOLOZA_RUN_ID": run_id,
+        "EVOLOZA_ROUND": str(round_index),
+        "EVOLOZA_ARTIFACT_DIR": str(artifact_dir),
+        "EVOLOZA_WORKTREE": str(worktree),
+        "EVOLOZA_BASE_BRANCH": base_branch,
+    }
+    if champion_branch:
+        env["EVOLOZA_CHAMPION_BRANCH"] = champion_branch
+    if champion_score is not None:
+        env["EVOLOZA_CHAMPION_SCORE"] = "{0:.6f}".format(champion_score)
+    return env
 
 
 def build_worker_prompt(
@@ -1156,6 +1186,7 @@ class Orchestrator:
                 config=config,
                 run_id=state.run_id,
                 round_index=state.current_round,
+                base_branch=state.base_branch,
                 champion=state.champion,
                 branch_name=candidate["branch"],
                 worktree_path=Path(candidate["worktree"]),
@@ -1233,6 +1264,14 @@ class Orchestrator:
             artifact_dir,
             progress=self.progress,
             stage_prefix="Baseline evaluator",
+            context_env=build_evaluator_context_env(
+                run_id=state.run_id,
+                round_index=0,
+                artifact_dir=artifact_dir,
+                worktree=self.repo,
+                base_branch=state.base_branch,
+                champion_branch=state.base_branch,
+            ),
         )
         if not evaluation.passed or evaluation.score is None:
             raise RuntimeError("Baseline evaluation failed: {0}".format(evaluation.failure_reason))
@@ -1298,6 +1337,7 @@ class Orchestrator:
         config: ProjectConfig,
         run_id: str,
         round_index: int,
+        base_branch: str,
         champion: ChampionState,
         branch_name: str,
         worktree_path: Path,
@@ -1359,6 +1399,15 @@ class Orchestrator:
                     artifact_dir,
                     progress=self.progress,
                     stage_prefix="Round {0} evaluator".format(round_index),
+                    context_env=build_evaluator_context_env(
+                        run_id=run_id,
+                        round_index=round_index,
+                        artifact_dir=artifact_dir,
+                        worktree=worktree_path,
+                        base_branch=base_branch,
+                        champion_branch=champion.branch,
+                        champion_score=champion.score,
+                    ),
                 )
                 if not evaluation.passed or evaluation.score is None:
                     summary = evaluation.failure_reason or summary
