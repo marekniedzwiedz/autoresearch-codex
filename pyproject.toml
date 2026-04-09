@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "evoloza"
 version = "0.1.0"
-description = "A Codex-native improvement-loop harness for git repositories."
+description = "An improvement-loop harness for git repositories with Codex and Ollama backends."
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [

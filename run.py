@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fnmatch
 import json
 import os
 import re
@@ -11,6 +12,8 @@ import sys
 import textwrap
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,13 +56,70 @@ WORKER_OUTPUT_SCHEMA = {
         "files_touched": {"type": "array", "items": {"type": "string"}},
         "local_checks_run": {"type": "array", "items": {"type": "string"}},
         "risks": {"type": "array", "items": {"type": "string"}},
+        "patch": {"type": "string"},
     },
     "required": ["hypothesis", "summary", "files_touched", "local_checks_run", "risks"],
     "additionalProperties": False,
 }
+SUPPORTED_WORKER_BACKENDS = {"codex", "ollama"}
+DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
+DEFAULT_OLLAMA_TEMPERATURE = 0.2
+DEFAULT_CONTEXT_MAX_BYTES = 120000
+DEFAULT_CONTEXT_FILE_BYTES = 24000
+DEFAULT_CONTEXT_FILE_COUNT = 24
+TEXT_FILE_EXTENSIONS = {
+    ".c",
+    ".cc",
+    ".cfg",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".go",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".kt",
+    ".lua",
+    ".m",
+    ".md",
+    ".php",
+    ".pl",
+    ".py",
+    ".r",
+    ".rb",
+    ".rs",
+    ".scala",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".swift",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".zsh",
+}
+TEXT_FILE_NAMES = {
+    ".editorconfig",
+    ".gitignore",
+    ".prettierrc",
+    "Dockerfile",
+    "Makefile",
+    "README",
+    "README.md",
+    "requirements.txt",
+}
 
 DEFAULT_PROGRAM = """# Mission
-Describe the objective Codex should optimize for in this repository.
+Describe the objective the worker should optimize for in this repository.
 
 ## Goal
 - State the desired outcome.
@@ -71,14 +131,42 @@ Describe the objective Codex should optimize for in this repository.
 - Explain what kinds of changes are allowed and what tradeoffs matter.
 """
 
-DEFAULT_CONFIG = """# Codex execution settings.
-[codex]
-# Path to the Codex CLI binary.
+DEFAULT_CONFIG = """# Worker execution settings.
+[worker]
+# Backend name: `codex` or `ollama`.
+backend = "codex"
+# Path to the Codex CLI binary when backend = "codex".
 binary = "codex"
-# Optional model override. Leave empty to use the CLI default.
+# Optional model override. Leave empty to use the backend default.
 model = ""
-# Extra CLI args passed through to `codex exec`.
+# Extra CLI args passed through to `codex exec` when backend = "codex".
 extra_args = []
+# Ollama backend only: local API base URL.
+ollama_host = "http://127.0.0.1:11434"
+# Ollama backend only: repo-relative paths or globs to include in prompt context.
+context_files = []
+# Ollama backend only: prompt snapshot limits.
+max_context_bytes = 120000
+max_file_bytes = 24000
+max_files = 24
+# Ollama backend only: sampling temperature.
+temperature = 0.2
+
+# Example Codex settings:
+# backend = "codex"
+# binary = "codex"
+# model = ""
+# extra_args = []
+#
+# Example Ollama settings:
+# backend = "ollama"
+# model = "qwen2.5-coder:32b"
+# ollama_host = "http://127.0.0.1:11434"
+# context_files = ["solver.py", "benchmark.py", "test_*.py"]
+# max_context_bytes = 120000
+# max_file_bytes = 24000
+# max_files = 24
+# temperature = 0.2
 
 # Loop stopping conditions.
 [search]
@@ -91,7 +179,7 @@ max_stagnation_rounds = 3
 
 # How the harness evaluates a candidate branch.
 [evaluator]
-# Commands run after each Codex attempt. All must exit with code 0.
+# Commands run after each worker attempt. All must exit with code 0.
 commands = ["python3 -c \\"print('EVOLOZA_SCORE=0')\\""]
 # Regex used to extract the numeric score from evaluator output.
 score_regex = "EVOLOZA_SCORE=(?P<score>-?[0-9]+(?:\\\\.[0-9]+)?)"
@@ -115,10 +203,17 @@ class GitError(RuntimeError):
 
 
 @dataclass
-class CodexSettings:
+class WorkerSettings:
+    backend: str = "codex"
     binary: str = "codex"
     model: Optional[str] = None
     extra_args: List[str] = field(default_factory=list)
+    ollama_host: str = DEFAULT_OLLAMA_HOST
+    context_files: List[str] = field(default_factory=list)
+    max_context_bytes: int = DEFAULT_CONTEXT_MAX_BYTES
+    max_file_bytes: int = DEFAULT_CONTEXT_FILE_BYTES
+    max_files: int = DEFAULT_CONTEXT_FILE_COUNT
+    temperature: float = DEFAULT_OLLAMA_TEMPERATURE
 
 
 @dataclass
@@ -143,7 +238,7 @@ class GitSettings:
 
 @dataclass
 class ProjectConfig:
-    codex: CodexSettings
+    worker: WorkerSettings
     evaluator: EvaluatorSettings
     search: SearchSettings
     git: GitSettings
@@ -221,9 +316,9 @@ class EvaluationResult:
 
 
 @dataclass
-class CodexInvocationResult:
+class WorkerInvocationResult:
     returncode: int
-    jsonl_path: str
+    output_path: str
     stderr_path: str
     last_message_path: str
     structured_output: Optional[Dict[str, Any]]
@@ -588,10 +683,21 @@ def load_project_config(repo: Path) -> ProjectConfig:
             )
         )
     data = loads_toml(config_path.read_text(encoding="utf-8"))
-    codex_section = data.get("codex", {})
+    legacy_codex_section = data.get("codex", {})
+    worker_section = data.get("worker")
     evaluator_section = data.get("evaluator", {})
     search_section = data.get("search", {})
     git_section = data.get("git", {})
+
+    if worker_section is None:
+        worker_section = legacy_codex_section
+        backend = "codex"
+    else:
+        backend = str(worker_section.get("backend", "codex")).strip().lower() or "codex"
+    if backend not in SUPPORTED_WORKER_BACKENDS:
+        raise ValueError(
+            "worker.backend must be one of {0}".format(", ".join(sorted(SUPPORTED_WORKER_BACKENDS)))
+        )
 
     commands = evaluator_section.get("commands")
     if not isinstance(commands, list) or not commands:
@@ -599,12 +705,35 @@ def load_project_config(repo: Path) -> ProjectConfig:
     direction = evaluator_section.get("direction", "maximize")
     if direction not in {"maximize", "minimize"}:
         raise ValueError("evaluator.direction must be 'maximize' or 'minimize'")
+    worker_extra_args = worker_section.get("extra_args", legacy_codex_section.get("extra_args", []))
+    if not isinstance(worker_extra_args, list):
+        raise ValueError("worker.extra_args must be a TOML array")
+    worker_context_files = worker_section.get("context_files", [])
+    if not isinstance(worker_context_files, list):
+        raise ValueError("worker.context_files must be a TOML array")
 
     return ProjectConfig(
-        codex=CodexSettings(
-            binary=str(codex_section.get("binary", "codex")),
-            model=_empty_to_none(codex_section.get("model")),
-            extra_args=[str(item) for item in codex_section.get("extra_args", [])],
+        worker=WorkerSettings(
+            backend=backend,
+            binary=str(
+                worker_section.get(
+                    "binary",
+                    legacy_codex_section.get("binary", "codex" if backend == "codex" else "ollama"),
+                )
+            ),
+            model=_empty_to_none(worker_section.get("model", legacy_codex_section.get("model"))),
+            extra_args=[str(item) for item in worker_extra_args],
+            ollama_host=str(
+                worker_section.get(
+                    "ollama_host",
+                    worker_section.get("host", DEFAULT_OLLAMA_HOST),
+                )
+            ),
+            context_files=[str(item) for item in worker_context_files],
+            max_context_bytes=int(worker_section.get("max_context_bytes", DEFAULT_CONTEXT_MAX_BYTES)),
+            max_file_bytes=int(worker_section.get("max_file_bytes", DEFAULT_CONTEXT_FILE_BYTES)),
+            max_files=int(worker_section.get("max_files", DEFAULT_CONTEXT_FILE_COUNT)),
+            temperature=float(worker_section.get("temperature", DEFAULT_OLLAMA_TEMPERATURE)),
         ),
         evaluator=EvaluatorSettings(
             commands=[str(item) for item in commands],
@@ -908,7 +1037,7 @@ def build_evaluator_context_env(
     return env
 
 
-def build_worker_prompt(
+def build_codex_prompt(
     program: str,
     config: ProjectConfig,
     run_id: str,
@@ -916,7 +1045,7 @@ def build_worker_prompt(
     champion: ChampionState,
     branch_name: str,
     history_rows: List[Dict[str, str]],
-) -> str:
+    ) -> str:
     history_block = render_history_for_prompt(history_rows)
     prompt = """
     You are running one {app_name} experiment.
@@ -965,17 +1094,453 @@ def build_worker_prompt(
     ).strip() + "\n"
 
 
+def worker_display_name(settings: WorkerSettings) -> str:
+    if settings.backend == "ollama":
+        return "Ollama"
+    return "Codex"
+
+
+def context_path_matches(path: str, patterns: List[str]) -> bool:
+    normalized = path.replace(os.sep, "/")
+    basename = Path(normalized).name
+    for pattern in patterns:
+        candidate = str(pattern).strip()
+        if not candidate:
+            continue
+        if fnmatch.fnmatch(normalized, candidate) or fnmatch.fnmatch(basename, candidate):
+            return True
+    return False
+
+
+def is_probably_text_file(path: Path) -> bool:
+    if path.name in TEXT_FILE_NAMES or path.suffix.lower() in TEXT_FILE_EXTENSIONS:
+        return True
+    try:
+        sample = path.read_bytes()[:4096]
+    except OSError:
+        return False
+    return b"\0" not in sample
+
+
+def score_context_file(relpath: str, hint_text: str, size_bytes: int, forced: bool) -> int:
+    path_text = relpath.lower()
+    basename = Path(relpath).name.lower()
+    score = 0
+    if forced:
+        score += 10000
+    if path_text in hint_text or basename in hint_text:
+        score += 1500
+    if Path(relpath).suffix.lower() in TEXT_FILE_EXTENSIONS or basename in {item.lower() for item in TEXT_FILE_NAMES}:
+        score += 200
+    if "/test" in path_text or basename.startswith("test_"):
+        score += 75
+    if basename in {"pyproject.toml", "package.json", "requirements.txt", "setup.py"}:
+        score += 125
+    score -= min(size_bytes, 50000) // 200
+    return score
+
+
+def truncate_text_to_bytes(text: str, limit: int) -> Tuple[str, bool]:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text, False
+    truncated = encoded[: max(limit, 0)]
+    while truncated and (truncated[-1] & 0xC0) == 0x80:
+        truncated = truncated[:-1]
+    payload = truncated.decode("utf-8", errors="ignore").rstrip()
+    return payload + "\n... [truncated]\n", True
+
+
+def render_repo_file_list(paths: List[str], limit: int = 200) -> str:
+    if not paths:
+        return "- No tracked files."
+    visible = paths[:limit]
+    lines = ["- {0}".format(path) for path in visible]
+    remaining = len(paths) - len(visible)
+    if remaining > 0:
+        lines.append("- ... ({0} more files omitted)".format(remaining))
+    return "\n".join(lines)
+
+
+def render_repo_snapshot_entry(relpath: str, content: str, truncated: bool) -> str:
+    trailer = "\n[truncated]\n" if truncated and not content.rstrip().endswith("[truncated]") else ""
+    body = content.rstrip("\n")
+    return "=== FILE: {0} ===\n{1}{2}\n=== END FILE ===\n".format(relpath, body, trailer)
+
+
+def build_repo_snapshot(worktree: Path, config: ProjectConfig, program: str) -> Tuple[str, List[str], List[str]]:
+    all_paths = [line.strip() for line in run_git(worktree, "ls-files").splitlines() if line.strip()]
+    included_entries: List[str] = []
+    included_paths: List[str] = []
+    omitted_paths: List[str] = []
+    total_bytes = 0
+    artifact_prefix = config.git.artifacts_dir.rstrip("/") + "/"
+    hint_text = (program + "\n" + "\n".join(config.evaluator.commands)).lower()
+    candidates = []
+
+    for relpath in all_paths:
+        if relpath.startswith(".git/") or relpath.startswith(artifact_prefix):
+            continue
+        forced = context_path_matches(relpath, config.worker.context_files)
+        if relpath in {PROGRAM_FILENAME, CONFIG_FILENAME, LEGACY_CONFIG_FILENAME} and not forced:
+            continue
+        path = worktree / relpath
+        if not path.is_file() or not is_probably_text_file(path):
+            continue
+        try:
+            size_bytes = path.stat().st_size
+        except OSError:
+            continue
+        if size_bytes > config.worker.max_file_bytes and not forced:
+            omitted_paths.append(relpath)
+            continue
+        candidates.append(
+            (
+                0 if forced else 1,
+                -score_context_file(relpath, hint_text, size_bytes, forced),
+                size_bytes,
+                relpath,
+                forced,
+            )
+        )
+
+    for _, _, _, relpath, forced in sorted(candidates):
+        if len(included_paths) >= config.worker.max_files:
+            omitted_paths.append(relpath)
+            continue
+        path = worktree / relpath
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            omitted_paths.append(relpath)
+            continue
+        content_limit = config.worker.max_file_bytes
+        if forced:
+            content_limit = max(content_limit, min(config.worker.max_context_bytes, content_limit * 2))
+        rendered_content, truncated = truncate_text_to_bytes(content, content_limit)
+        entry = render_repo_snapshot_entry(relpath, rendered_content, truncated)
+        entry_bytes = len(entry.encode("utf-8"))
+        if included_entries and total_bytes + entry_bytes > config.worker.max_context_bytes:
+            omitted_paths.append(relpath)
+            continue
+        if not included_entries and entry_bytes > config.worker.max_context_bytes:
+            reduced_content, reduced_truncated = truncate_text_to_bytes(
+                content,
+                max(1024, config.worker.max_context_bytes - 256),
+            )
+            entry = render_repo_snapshot_entry(relpath, reduced_content, reduced_truncated)
+            entry_bytes = len(entry.encode("utf-8"))
+        if entry_bytes > config.worker.max_context_bytes or total_bytes + entry_bytes > config.worker.max_context_bytes:
+            omitted_paths.append(relpath)
+            continue
+        included_entries.append(entry)
+        included_paths.append(relpath)
+        total_bytes += entry_bytes
+
+    if not included_entries:
+        return "No repository files fit inside the configured Ollama prompt budget.\n", [], omitted_paths
+    return "\n".join(included_entries).rstrip() + "\n", included_paths, omitted_paths
+
+
+def build_ollama_prompt(
+    worktree: Path,
+    program: str,
+    config: ProjectConfig,
+    run_id: str,
+    round_index: int,
+    champion: ChampionState,
+    branch_name: str,
+    history_rows: List[Dict[str, str]],
+) -> str:
+    history_block = render_history_for_prompt(history_rows)
+    all_paths = [line.strip() for line in run_git(worktree, "ls-files").splitlines() if line.strip()]
+    snapshot, included_paths, omitted_paths = build_repo_snapshot(worktree, config, program)
+    prompt = """
+    You are preparing one {app_name} experiment patch for a git repository.
+
+    Run id: {run_id}
+    Round: {round_index}
+    Champion branch: {champion_branch}
+    Candidate branch: {branch_name}
+    Current champion score: {champion_score:.6f}
+    Score direction: {direction}
+    Current champion summary: {champion_summary}
+
+    Previous experiment log:
+    {history_block}
+
+    Official evaluator commands:
+    {commands}
+
+    Hard rules:
+    - You cannot execute commands or inspect the filesystem directly.
+    - Use only the repository snapshot included below.
+    - Return exactly one JSON object and nothing else.
+    - The JSON object must include: hypothesis, summary, files_touched, local_checks_run, risks, patch.
+    - The `patch` field must be a unified git diff that can be applied with `git apply`.
+    - Only modify existing text files whose contents are included below, unless you are creating a small supporting text file.
+    - If the snapshot is not sufficient, return an empty patch and explain the missing context in `risks`.
+    - Keep the change focused on one experiment.
+
+    Mission:
+    {program}
+
+    Repository file list:
+    {file_list}
+
+    Included snapshot files:
+    {included_paths}
+
+    Omitted snapshot files:
+    {omitted_paths}
+
+    Repository snapshot:
+    {snapshot}
+    """
+    return textwrap.dedent(
+        prompt.format(
+            app_name=APP_NAME,
+            run_id=run_id,
+            round_index=round_index,
+            champion_branch=champion.branch,
+            branch_name=branch_name,
+            champion_score=champion.score,
+            direction=config.evaluator.direction,
+            champion_summary=champion.summary,
+            history_block=history_block,
+            commands="\n".join("- {0}".format(item) for item in config.evaluator.commands),
+            program=program.strip(),
+            file_list=render_repo_file_list(all_paths),
+            included_paths=render_repo_file_list(included_paths, limit=max(len(included_paths), 1)),
+            omitted_paths=render_repo_file_list(omitted_paths, limit=50),
+            snapshot=snapshot.rstrip(),
+        )
+    ).strip() + "\n"
+
+
+def build_worker_prompt(
+    worktree: Path,
+    program: str,
+    config: ProjectConfig,
+    run_id: str,
+    round_index: int,
+    champion: ChampionState,
+    branch_name: str,
+    history_rows: List[Dict[str, str]],
+) -> str:
+    if config.worker.backend == "ollama":
+        return build_ollama_prompt(
+            worktree,
+            program,
+            config,
+            run_id,
+            round_index,
+            champion,
+            branch_name,
+            history_rows,
+        )
+    return build_codex_prompt(
+        program,
+        config,
+        run_id,
+        round_index,
+        champion,
+        branch_name,
+        history_rows,
+    )
+
+
+def strip_code_fences(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if lines:
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    candidates = [text.strip(), strip_code_fences(text)]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    raw = text.strip()
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start == -1 or end == -1 or start >= end:
+        return None
+    try:
+        parsed = json.loads(raw[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def extract_ollama_structured_output(response: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for field in ("response", "thinking"):
+        value = response.get(field)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        parsed = extract_json_object(value)
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def normalize_string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    items = []
+    for entry in value:
+        text = str(entry).strip()
+        if text:
+            items.append(text)
+    return items
+
+
+def normalize_patch_text(text: str) -> str:
+    stripped = strip_code_fences(text)
+    diff_index = stripped.find("diff --git ")
+    if diff_index != -1:
+        stripped = stripped[diff_index:]
+    stripped = stripped.strip()
+    if not stripped:
+        return ""
+    return repair_unified_diff_hunks(stripped) + "\n"
+
+
+def repair_unified_diff_hunks(patch_text: str) -> str:
+    lines = patch_text.splitlines()
+    repaired = []
+    in_hunk = False
+    for line in lines:
+        if line.startswith("diff --git "):
+            in_hunk = False
+        elif line.startswith("@@ "):
+            in_hunk = True
+        elif in_hunk and not line.startswith((" ", "+", "-", "\\")):
+            line = " " + line
+        repaired.append(line)
+    return "\n".join(repaired)
+
+
+def normalize_worker_output(payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "hypothesis": str(payload.get("hypothesis") or "No hypothesis provided.").strip()
+        or "No hypothesis provided.",
+        "summary": str(payload.get("summary") or "No summary provided.").strip()
+        or "No summary provided.",
+        "files_touched": normalize_string_list(payload.get("files_touched")),
+        "local_checks_run": normalize_string_list(payload.get("local_checks_run")),
+        "risks": normalize_string_list(payload.get("risks")),
+        "patch": normalize_patch_text(str(payload.get("patch", ""))),
+    }
+
+
+def apply_unified_diff(worktree: Path, artifact_dir: Path, patch_text: str) -> Optional[str]:
+    patch_path = artifact_dir / "candidate.patch"
+    patch_path.write_text(patch_text, encoding="utf-8")
+    for args in (
+        ["git", "apply", "--check", "--recount", "--whitespace=nowarn", str(patch_path)],
+        ["git", "apply", "--recount", "--whitespace=nowarn", str(patch_path)],
+    ):
+        result = subprocess.run(
+            args,
+            cwd=str(worktree),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return result.stderr.strip() or result.stdout.strip() or "git apply failed"
+    return None
+
+
+def select_preferred_ollama_model(model_names: List[str]) -> Optional[str]:
+    if not model_names:
+        return None
+    preferences = (
+        "qwen2.5-coder",
+        "codestral",
+        "deepseek-coder",
+        "codellama",
+        "starcoder",
+        "qwen",
+        "mistral",
+        "llama",
+    )
+    lowered = [(name, name.lower()) for name in model_names]
+    for prefix in preferences:
+        for original, normalized in lowered:
+            if prefix in normalized:
+                return original
+    return model_names[0]
+
+
+def ollama_api_json(base_url: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    url = base_url.rstrip("/") + path
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=3600) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError("Ollama API error {0}: {1}".format(exc.code, detail or exc.reason))
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Ollama API unavailable at {0}: {1}".format(url, exc.reason))
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Ollama API returned invalid JSON: {0}".format(exc))
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Ollama API returned an unexpected payload")
+    return parsed
+
+
+def resolve_ollama_model(settings: WorkerSettings) -> str:
+    if settings.model:
+        return settings.model
+    tags = ollama_api_json(settings.ollama_host, "/api/tags")
+    models = tags.get("models", [])
+    if not isinstance(models, list):
+        raise RuntimeError("Ollama /api/tags did not return a model list")
+    names = []
+    for item in models:
+        if isinstance(item, dict) and item.get("name"):
+            names.append(str(item["name"]))
+    selected = select_preferred_ollama_model(names)
+    if selected is None:
+        raise RuntimeError("No Ollama models are available at {0}".format(settings.ollama_host))
+    return selected
+
+
 def run_codex(
     worktree: Path,
     artifact_dir: Path,
     prompt: str,
-    settings: CodexSettings,
+    settings: WorkerSettings,
     progress: Optional[ProgressReporter] = None,
     stage_message: str = "Codex working",
-) -> CodexInvocationResult:
+) -> WorkerInvocationResult:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     schema_path = artifact_dir / "worker_output_schema.json"
-    jsonl_path = artifact_dir / "codex.jsonl"
+    output_path = artifact_dir / "codex.jsonl"
     stderr_path = artifact_dir / "codex.stderr.log"
     last_message_path = artifact_dir / "last_message.json"
     schema_path.write_text(json.dumps(WORKER_OUTPUT_SCHEMA, indent=2), encoding="utf-8")
@@ -1017,27 +1582,125 @@ def run_codex(
         finally:
             if watcher is not None:
                 watcher.stop()
-    jsonl_path.write_text(stdout_text, encoding="utf-8")
+    output_path.write_text(stdout_text, encoding="utf-8")
     stderr_path.write_text(stderr_text, encoding="utf-8")
     structured_output = None
     if last_message_path.exists():
         content = last_message_path.read_text(encoding="utf-8").strip()
         if content:
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                structured_output = parsed
+            structured_output = normalize_worker_output(extract_json_object(content))
     usage = parse_usage_from_jsonl(stdout_text)
-    return CodexInvocationResult(
+    return WorkerInvocationResult(
         returncode=process.returncode if process is not None else 1,
-        jsonl_path=str(jsonl_path),
+        output_path=str(output_path),
         stderr_path=str(stderr_path),
         last_message_path=str(last_message_path),
         structured_output=structured_output,
         usage=usage,
     )
+
+
+def run_ollama(
+    worktree: Path,
+    artifact_dir: Path,
+    prompt: str,
+    settings: WorkerSettings,
+    progress: Optional[ProgressReporter] = None,
+    stage_message: str = "Ollama working",
+) -> WorkerInvocationResult:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    request_path = artifact_dir / "ollama.request.json"
+    response_path = artifact_dir / "ollama.response.json"
+    stderr_path = artifact_dir / "ollama.stderr.log"
+    last_message_path = artifact_dir / "last_message.json"
+    if progress is not None and not progress.enabled:
+        progress.event(stage_message)
+    structured_output = None
+    usage = None
+    try:
+        model = resolve_ollama_model(settings)
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "format": "json",
+            "stream": False,
+            "options": {
+                "temperature": settings.temperature,
+            },
+        }
+        request_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        with progress.spin(stage_message) if progress is not None else _nullcontext():
+            response = ollama_api_json(settings.ollama_host, "/api/generate", payload)
+        response_path.write_text(json.dumps(response, indent=2), encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        structured_output = normalize_worker_output(extract_ollama_structured_output(response))
+        if structured_output is None:
+            message = "Ollama response did not contain a valid JSON object"
+            stderr_path.write_text(message, encoding="utf-8")
+            return WorkerInvocationResult(
+                returncode=1,
+                output_path=str(response_path),
+                stderr_path=str(stderr_path),
+                last_message_path=str(last_message_path),
+                structured_output=None,
+                usage=None,
+            )
+        last_message_path.write_text(json.dumps(structured_output, indent=2), encoding="utf-8")
+        patch_error = None
+        if structured_output.get("patch"):
+            patch_error = apply_unified_diff(worktree, artifact_dir, str(structured_output["patch"]))
+        if patch_error is not None:
+            structured_output["summary"] = "Patch apply failed: {0}".format(patch_error)
+            last_message_path.write_text(json.dumps(structured_output, indent=2), encoding="utf-8")
+            stderr_path.write_text(patch_error, encoding="utf-8")
+            return WorkerInvocationResult(
+                returncode=1,
+                output_path=str(response_path),
+                stderr_path=str(stderr_path),
+                last_message_path=str(last_message_path),
+                structured_output=structured_output,
+                usage=None,
+            )
+        usage = normalize_token_usage(
+            {
+                "input_tokens": response.get("prompt_eval_count", 0),
+                "cached_input_tokens": 0,
+                "output_tokens": response.get("eval_count", 0),
+            }
+        )
+        return WorkerInvocationResult(
+            returncode=0,
+            output_path=str(response_path),
+            stderr_path=str(stderr_path),
+            last_message_path=str(last_message_path),
+            structured_output=structured_output,
+            usage=usage,
+        )
+    except Exception as exc:
+        stderr_path.write_text(str(exc), encoding="utf-8")
+        return WorkerInvocationResult(
+            returncode=1,
+            output_path=str(response_path),
+            stderr_path=str(stderr_path),
+            last_message_path=str(last_message_path),
+            structured_output=structured_output,
+            usage=usage,
+        )
+
+
+def run_worker(
+    worktree: Path,
+    artifact_dir: Path,
+    prompt: str,
+    settings: WorkerSettings,
+    progress: Optional[ProgressReporter] = None,
+    stage_message: Optional[str] = None,
+) -> WorkerInvocationResult:
+    label = worker_display_name(settings)
+    message = stage_message or "{0} working".format(label)
+    if settings.backend == "ollama":
+        return run_ollama(worktree, artifact_dir, prompt, settings, progress=progress, stage_message=message)
+    return run_codex(worktree, artifact_dir, prompt, settings, progress=progress, stage_message=message)
 
 
 def ensure_results_file(path: Path) -> None:
@@ -1348,7 +2011,13 @@ class Orchestrator:
         history_rows: List[Dict[str, str]],
     ) -> CandidateResult:
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        create_worktree(self.repo, worktree_path, branch_name, champion.branch)
+        if self.progress is not None:
+            self.progress.event(
+                "Round {0}: candidate branch {1}".format(round_index, branch_name)
+            )
         prompt = build_worker_prompt(
+            worktree_path,
             program=program_text(self.repo),
             config=config,
             run_id=run_id,
@@ -1358,12 +2027,6 @@ class Orchestrator:
             history_rows=history_rows,
         )
         (artifact_dir / "prompt.md").write_text(prompt, encoding="utf-8")
-
-        create_worktree(self.repo, worktree_path, branch_name, champion.branch)
-        if self.progress is not None:
-            self.progress.event(
-                "Round {0}: candidate branch {1}".format(round_index, branch_name)
-            )
         status = "failed"
         score = None
         commit = None
@@ -1371,13 +2034,14 @@ class Orchestrator:
         summary = "No summary provided."
         files_changed = 0
         try:
-            invocation = run_codex(
+            worker_name = worker_display_name(config.worker)
+            invocation = run_worker(
                 worktree_path,
                 artifact_dir,
                 prompt,
-                config.codex,
+                config.worker,
                 progress=self.progress,
-                stage_message="Round {0}: Codex working on {1}".format(round_index, branch_name),
+                stage_message="Round {0}: {1} working on {2}".format(round_index, worker_name, branch_name),
             )
             if self.progress is not None:
                 self.progress.finalize_live_usage(invocation.usage)
@@ -1389,7 +2053,7 @@ class Orchestrator:
             changed_paths = tracked_changes(worktree_path)
             files_changed = len(changed_paths)
             if invocation.returncode != 0:
-                summary = "Codex exec failed. {0}".format(summary)
+                summary = "{0} worker failed. {1}".format(worker_name, summary)
             elif hypothesis_seen_before(history_rows, hypothesis):
                 status = "duplicate"
                 summary = "Rejected as duplicate hypothesis. {0}".format(summary)
@@ -1794,9 +2458,13 @@ def truncate_middle(text: str, max_width: int) -> str:
 
 
 def compact_progress_message(message: str) -> str:
-    round_codex = re.match(r"^Round (\d+): Codex working on .*/(r\d+)$", message)
-    if round_codex:
-        return "r{0} codex {1}".format(round_codex.group(1), round_codex.group(2))
+    round_worker = re.match(r"^Round (\d+): ([A-Za-z0-9_-]+) working on .*/(r\d+)$", message)
+    if round_worker:
+        return "r{0} {1} {2}".format(
+            round_worker.group(1),
+            round_worker.group(2).lower(),
+            round_worker.group(3),
+        )
     round_eval = re.match(r"^Round (\d+) evaluator (\d+)/(\d+):", message)
     if round_eval:
         return "r{0} eval {1}/{2}".format(

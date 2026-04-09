@@ -1,8 +1,9 @@
-# Codex execution settings.
-[codex]
+# Worker execution settings.
+[worker]
+backend = "codex"
 # Path to the Codex CLI binary.
 binary = "codex"
-# Optional model override. Leave empty to use the CLI default.
+# Optional model override. Leave empty to use the backend default.
 model = ""
 # Extra CLI args passed through to `codex exec`.
 extra_args = []
@@ -18,7 +19,7 @@ max_stagnation_rounds = 3
 
 # How the harness evaluates a candidate branch.
 [evaluator]
-# Commands run after each Codex attempt. All must exit with code 0.
+# Commands run after each worker attempt. All must exit with code 0.
 commands = ["python3 -m unittest -q", "python3 benchmark.py"]
 # Regex used to extract the numeric score from evaluator output.
 score_regex = "EVOLOZA_SCORE=(?P<score>-?[0-9]+(?:\\.[0-9]+)?)"

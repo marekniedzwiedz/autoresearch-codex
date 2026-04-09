@@ -9,7 +9,7 @@ README = Path(__file__).with_name("README.md").read_text(encoding="utf-8")
 setup(
     name="evoloza",
     version="0.1.0",
-    description="A Codex-native improvement-loop harness for git repositories.",
+    description="An improvement-loop harness for git repositories with Codex and Ollama backends.",
     long_description=README,
     long_description_content_type="text/markdown",
     author="Evoloza",

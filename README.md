@@ -5,7 +5,7 @@ against arbitrary git repositories.
 
 You point it at a target repo, give it instructions in `program.md`, and define
 an evaluator command that emits a numeric score. The harness then creates
-isolated candidate branches, asks Codex to make one focused improvement
+isolated candidate branches, asks a configured worker to make one focused improvement
 attempt, runs the evaluator, and only keeps the change if it beats the current
 champion.
 
@@ -29,7 +29,7 @@ mostly shaved latency while preserving exact benchmark quality.
 
 - A clean baseline score from the current branch
 - One candidate branch and one git worktree per round
-- Codex invocation and structured experiment summaries
+- Worker invocation and structured experiment summaries
 - Evaluator execution and score extraction
 - Champion promotion when a candidate improves the score
 - Append-only experiment history in `.evoloza/results.tsv`
@@ -39,7 +39,7 @@ mostly shaved latency while preserving exact benchmark quality.
 
 1. Measure the baseline on the current branch.
 2. Create a candidate branch and worktree from the current champion.
-3. Ask Codex to make one focused improvement attempt.
+3. Ask the configured worker to make one focused improvement attempt.
 4. Run the evaluator command(s) and extract the score.
 5. If the score improves, commit and promote the candidate.
 6. If the score does not improve, discard the candidate branch.
@@ -83,7 +83,7 @@ For local development in this repository, you can also run:
 
 Each target repo supplies:
 
-- `program.md` with human-written guidance for Codex
+- `program.md` with human-written guidance for the worker
 - `config.toml` with loop and evaluator settings
 - At least one evaluator command that exits successfully and prints a parseable score
 
@@ -139,8 +139,9 @@ Improve the benchmark score without breaking existing behavior.
 Edit `/tmp/demo-repo/config.toml`:
 
 ```toml
-# Codex execution settings.
-[codex]
+# Worker execution settings.
+[worker]
+backend = "codex"
 binary = "codex"
 model = ""
 extra_args = []
@@ -163,6 +164,48 @@ base_branch = ""
 artifacts_dir = ".evoloza"
 ```
 
+The same file can be switched to Ollama by replacing the worker section:
+
+```toml
+[worker]
+backend = "ollama"
+model = "qwen2.5-coder:32b"
+ollama_host = "http://127.0.0.1:11434"
+context_files = ["solver.py", "benchmark.py", "test_*.py"]
+max_context_bytes = 120000
+max_file_bytes = 24000
+max_files = 24
+temperature = 0.2
+```
+
+Codex backend sample:
+
+```toml
+[worker]
+backend = "codex"
+binary = "codex"
+model = ""
+extra_args = []
+```
+
+Ollama backend sample:
+
+```toml
+[worker]
+backend = "ollama"
+model = "qwen2.5-coder:32b"
+ollama_host = "http://127.0.0.1:11434"
+context_files = ["solver.py", "benchmark.py", "test_*.py"]
+max_context_bytes = 120000
+max_file_bytes = 24000
+max_files = 24
+temperature = 0.2
+```
+
+The Ollama backend is patch-based rather than tool-using. It works best when
+`program.md` narrows the editable surface or `worker.context_files` points at
+the most relevant files.
+
 Run the loop:
 
 ```bash
@@ -175,14 +218,14 @@ evoloza report --repo /tmp/demo-repo
 
 - The harness measures a baseline score from the current branch.
 - Each round runs in its own candidate branch and git worktree.
-- Codex is asked to make one improvement attempt and return a hypothesis.
+- The configured worker is asked to make one improvement attempt and return a hypothesis.
 - The evaluator command(s) run against the candidate worktree.
 - If the score improves, the candidate is committed and becomes the new champion.
 - If the score does not improve, the candidate branch is discarded.
 - The full experiment history is fed back into the next prompt, and exact
   repeated hypotheses are rejected as duplicates.
 - `run` stays in the foreground and shows progress, elapsed time, and token
-  usage when Codex session files are available.
+  usage when the selected backend reports it.
 - If the latest run already completed or stopped, `run` starts a fresh run from
   the last committed champion and continues using the full experiment history in
   `.evoloza/results.tsv`.
@@ -197,7 +240,7 @@ than a toy example. The implementation complexity mostly comes from:
 - persistent run/champion/candidate state
 - artifact capture for debugging and inspection
 - resumable experiment history across runs
-- Codex process integration and live progress reporting
+- worker process integration and progress reporting
 
 If you want the smallest possible repo in this style, follow Karpathy's design
 and bake the loop into one specific target repository. If you want the loop as
@@ -210,6 +253,7 @@ reusable infrastructure, this repo is aiming at that second category.
 - The target repo must be clean before `run` starts.
 - This project uses the Python standard library plus `tomli` on Python versions
   older than 3.11.
-- To actually run experiments, you still need `git` and the Codex CLI
-  installed, or another compatible binary configured via `config.toml` under
-  `[codex].binary`.
+- To actually run experiments, you still need `git` plus either the Codex CLI
+  or a local Ollama server with at least one installed model.
+- Legacy `[codex]` configs are still accepted, but new configs should use
+  `[worker]`.
