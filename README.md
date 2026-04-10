@@ -45,6 +45,20 @@ mostly shaved latency while preserving exact benchmark quality.
 6. If the score does not improve, discard the candidate branch.
 7. Record the outcome and continue until a stopping condition is reached.
 
+## Modes
+
+Evoloza now supports three operating modes:
+
+- `run`: mode 0, the current all-in-one loop where one worker handles ideation, patching, and evaluation.
+- `plan`: mode 1, generate a backlog of atomic experiment cards without executing them.
+- `execute`: mode 2, consume a saved plan card-by-card and evaluate each card normally.
+
+The intended split is:
+
+- use an expensive planner such as `gpt-5.4` for `plan`
+- use a cheaper or local executor such as Ollama `qwen3.5:35b` for `execute`
+- keep `run` for the original single-worker behavior
+
 ## How This Differs From `karpathy/autoresearch`
 
 `karpathy/autoresearch` is a compact research target. Most of the policy lives
@@ -67,8 +81,20 @@ repositories, not because the underlying search idea is more complicated.
 
 - `evoloza init --repo /path/to/repo`
 - `evoloza run --repo /path/to/repo`
+- `evoloza plan --repo /path/to/repo`
+- `evoloza execute --repo /path/to/repo --plan /path/to/plan.json`
 - `evoloza status --repo /path/to/repo`
 - `evoloza report --repo /path/to/repo`
+
+You can also point Evoloza at a specific config file when a target repo keeps
+multiple worker profiles side by side:
+
+- `evoloza init --repo /path/to/repo --config config.ollama.toml`
+- `evoloza run --repo /path/to/repo --config config.ollama.toml`
+- `evoloza plan --repo /path/to/repo --config config.codex.toml`
+- `evoloza execute --repo /path/to/repo --config config.ollama.toml --plan .evoloza/plans/<plan_id>/plan.json`
+- `evoloza status --repo /path/to/repo --config config.ollama.toml`
+- `evoloza report --repo /path/to/repo --config config.ollama.toml`
 
 The installed CLI is `evoloza`.
 
@@ -76,8 +102,18 @@ For local development in this repository, you can also run:
 
 - `python3 run.py init --repo /path/to/repo`
 - `python3 run.py run --repo /path/to/repo`
+- `python3 run.py plan --repo /path/to/repo`
+- `python3 run.py execute --repo /path/to/repo --plan /path/to/plan.json`
 - `python3 run.py status --repo /path/to/repo`
 - `python3 run.py report --repo /path/to/repo`
+
+Separate configs such as `config.codex.toml` and `config.ollama.toml` can share
+the same `program.md`. Pass the desired file with `--config`; relative paths are
+resolved from the target repo root. `execute` also resolves `--plan` relative to
+the target repo root, and if `--plan` is omitted it uses the latest saved plan
+under `.evoloza/plans/`. `status` and `report` also look up runs through the
+selected config's `git.artifacts_dir`, so use the same config that created the
+run when you inspect it later.
 
 ## Target Repo Contract
 
@@ -90,9 +126,12 @@ Each target repo supplies:
 The harness writes its own state under `.evoloza/`, including:
 
 - `.evoloza/results.tsv` for cross-run experiment history
+- `.evoloza/plans/<plan_id>/plan.json` for saved experiment-card backlogs
 - `.evoloza/runs/<run_id>/state.json` for the latest run state
 - `.evoloza/runs/<run_id>/rounds/...` for per-round prompts, logs, and results
 - `.evoloza/worktrees/...` for temporary candidate worktrees
+- `preserved-worktree/` snapshots inside round artifacts when
+  `git.preserve_candidate_worktrees = true`
 
 Evaluator commands also receive run-local context through environment variables:
 
@@ -146,6 +185,24 @@ binary = "codex"
 model = ""
 extra_args = []
 
+[planner]
+backend = "codex"
+binary = "codex"
+model = "gpt-5.4"
+cards_per_plan = 6
+
+[executor]
+backend = "ollama"
+model = "qwen3.5:35b"
+context_files = ["solver.py", "benchmark.py", "test_*.py"]
+temperature = 0.15
+keep_alive = "30m"
+think = false
+
+[executor.ollama_options]
+num_ctx = 131072
+num_predict = 1024
+
 # Loop stopping conditions.
 [search]
 max_rounds = 5
@@ -162,6 +219,7 @@ direction = "maximize"
 [git]
 base_branch = ""
 artifacts_dir = ".evoloza"
+preserve_candidate_worktrees = true
 ```
 
 The same file can be switched to Ollama by replacing the worker section:
@@ -169,13 +227,54 @@ The same file can be switched to Ollama by replacing the worker section:
 ```toml
 [worker]
 backend = "ollama"
-model = "qwen2.5-coder:32b"
+model = "qwen3.5:35b"
 ollama_host = "http://127.0.0.1:11434"
 context_files = ["solver.py", "benchmark.py", "test_*.py"]
 max_context_bytes = 120000
 max_file_bytes = 24000
 max_files = 24
 temperature = 0.2
+keep_alive = "30m"
+request_timeout_seconds = 3600
+think = false
+forbidden_hypotheses = ["continuation history for quiet ordering"]
+
+[worker.ollama_options]
+num_ctx = 131072
+num_predict = 512
+
+[git]
+base_branch = ""
+artifacts_dir = ".evoloza"
+preserve_candidate_worktrees = true
+```
+
+Planner / executor split sample:
+
+```toml
+[planner]
+backend = "codex"
+binary = "codex"
+model = "gpt-5.4"
+cards_per_plan = 8
+
+[executor]
+backend = "ollama"
+model = "qwen3.5:35b"
+ollama_host = "http://127.0.0.1:11434"
+context_files = ["solver.py", "benchmark.py", "test_*.py"]
+max_context_bytes = 120000
+max_file_bytes = 24000
+max_files = 24
+temperature = 0.15
+keep_alive = "30m"
+request_timeout_seconds = 3600
+think = false
+forbidden_hypotheses = ["continuation history for quiet ordering"]
+
+[executor.ollama_options]
+num_ctx = 131072
+num_predict = 1024
 ```
 
 Codex backend sample:
@@ -200,11 +299,51 @@ max_context_bytes = 120000
 max_file_bytes = 24000
 max_files = 24
 temperature = 0.2
+keep_alive = "30m"
+request_timeout_seconds = 3600
+think = false
+forbidden_hypotheses = ["continuation history for quiet ordering"]
+
+[worker.ollama_options]
+num_ctx = 131072
+num_predict = 1024
 ```
 
-The Ollama backend is patch-based rather than tool-using. It works best when
-`program.md` narrows the editable surface or `worker.context_files` points at
-the most relevant files.
+The Ollama backend is still patch-based in `run`, but `execute` now uses
+anchored structured edit operations instead of raw unified diffs. That split is
+intentional: open-ended local-model rounds still behave like the legacy worker,
+while card-driven execution asks the model for exact `edit_ops` against one
+file and lets Evoloza materialize the final diff locally.
+
+It works best when `program.md` narrows the editable surface or
+`worker.context_files` points at the most relevant files. In `execute` mode,
+Evoloza narrows the prompt further by replacing the full `target_file` with
+focused excerpts around the card's `target_symbols`, `anchor_snippets`, and
+code identifiers mentioned in the card notes, while still including any extra
+context files such as `Cargo.toml` or compact journals.
+
+Any Ollama `/api/generate` option supported by your local server can be passed
+through under `[worker.ollama_options]`. This is the preferred place to set
+request-local controls such as `num_ctx`, `num_predict`, `seed`, or stop
+sequences from the target repository config.
+
+Practical Ollama controls:
+
+- `keep_alive` keeps the model loaded between rounds so repeated requests do not
+  pay a fresh load penalty.
+- `request_timeout_seconds` is the client-side timeout for one generation
+  request. Increase it when planning or large edit generation can take many
+  minutes.
+- `num_ctx` controls the server-side context window budget. Set it high enough
+  to avoid truncation, but do not max it blindly because larger KV caches cost
+  RAM and can increase latency.
+- `num_predict` is the easiest way to cap runaway patch or `edit_ops` output
+  from a local model.
+
+`worker.forbidden_hypotheses` lets the target repo seed off-limits idea
+directions for local-model runs. Evoloza uses those seeds both in the prompt
+and in duplicate detection, so Round 1 can reject known bad or already-covered
+families before they waste evaluation time.
 
 Run the loop:
 
@@ -214,12 +353,50 @@ evoloza status --repo /tmp/demo-repo
 evoloza report --repo /tmp/demo-repo
 ```
 
+Or split planning and execution:
+
+```bash
+evoloza plan --repo /tmp/demo-repo --config config.codex.toml
+evoloza execute --repo /tmp/demo-repo --config config.ollama.toml
+evoloza status --repo /tmp/demo-repo --config config.ollama.toml
+evoloza report --repo /tmp/demo-repo --config config.ollama.toml
+```
+
+`execute` defaults to the latest saved plan when `--plan` is omitted.
+
+`plan` now uses the planner worker's bounded repository snapshot, not open-ended
+tool exploration. In practice that means `[planner].context_files`,
+`max_context_bytes`, `max_file_bytes`, and `max_files` matter for Codex
+planners the same way they already mattered for Ollama prompts.
+
+## Experiment Cards
+
+`plan` writes a JSON backlog of atomic cards. Each card names:
+
+- one `target_file`
+- one short `hypothesis`
+- a few `target_symbols`
+- one to three exact `anchor_snippets` copied from the target file
+- an `allowed_edit_scope`
+- nearby `forbidden_families`
+- short `implementation_notes`
+- a `max_patch_lines` budget
+
+`execute` uses those cards to build a bounded worker prompt. For Ollama
+executors, the model must return structured `edit_ops` with exact
+`anchor_snippet` matches inside the card's `target_file`; Evoloza applies those
+ops locally, writes `candidate.patch`, and rejects anything that drifts outside
+the card scope.
+
 ## What Happens During `run`
 
 - The harness measures a baseline score from the current branch.
 - Each round runs in its own candidate branch and git worktree.
 - The configured worker is asked to make one improvement attempt and return a hypothesis.
 - The evaluator command(s) run against the candidate worktree.
+- If `git.preserve_candidate_worktrees = true`, Evoloza copies the evaluated
+  candidate worktree into the round artifacts before cleanup so the exact
+  source tree and built binaries remain available later.
 - If the score improves, the candidate is committed and becomes the new champion.
 - If the score does not improve, the candidate branch is discarded.
 - The full experiment history is fed back into the next prompt, and exact
@@ -229,6 +406,30 @@ evoloza report --repo /tmp/demo-repo
 - If the latest run already completed or stopped, `run` starts a fresh run from
   the last committed champion and continues using the full experiment history in
   `.evoloza/results.tsv`.
+
+## What Happens During `plan`
+
+- Evoloza reads `program.md`, prior experiment history, and a bounded snapshot
+  of the target repo built from the planner worker settings.
+- The planner backend returns a JSON backlog of atomic experiment cards.
+- The plan is saved under `.evoloza/plans/<plan_id>/plan.json`.
+- Planner prompt and backend artifacts are stored alongside the plan.
+
+## What Happens During `execute`
+
+- Evoloza loads a saved plan and treats each card as one future round.
+- The executor backend is prompted with one card at a time.
+- The executor prompt is scoped to the card's target file and target symbols.
+- For Ollama executors, the target file is shown as focused excerpts around the
+  card symbols, anchor snippets, and backticked identifiers instead of dumping
+  the whole file.
+- Ollama execute mode returns anchored `edit_ops`, not a raw patch. Evoloza
+  applies those ops locally, writes the resulting `candidate.patch`, and can run
+  one repair pass if the anchors do not apply cleanly on the first attempt.
+- Evaluation, promotion, artifact capture, and result history work the same way
+  as in `run`.
+- If `git.preserve_candidate_worktrees = true`, execute-mode rounds also keep a
+  preserved snapshot of the evaluated worktree under the round artifacts.
 
 ## Why The Repo Is Larger Than A Demo
 
